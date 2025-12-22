@@ -1,0 +1,408 @@
+---
+title: "DataConjoining"
+output: html_document
+---
+
+
+```{r}
+# installing libraries
+library(tidyverse)
+library(readxl)
+library(countrycode)
+```
+
+```{r}
+# function to clean unicef financial inclusion data
+clean_unicef_financial <- function(filepath) {
+  # read the unicef file (no headers)
+  unicef_raw <- read_excel(filepath, col_names = FALSE)
+  
+  # extract country names (column 1, starting from row 4)
+  # extract financial inclusion male (column 2) and female (column 3)
+  unicef_data <- data.frame(
+    Country_Name = unicef_raw[[1]][4:nrow(unicef_raw)],
+    Financial_Inclusion_Male = unicef_raw[[2]][4:nrow(unicef_raw)],
+    Financial_Inclusion_Female = unicef_raw[[3]][4:nrow(unicef_raw)]
+  )
+  
+  # remove rows with na country names
+  unicef_data <- unicef_data %>%
+    filter(!is.na(Country_Name))
+  
+  # convert financial inclusion to numeric (handle "-" as na)
+  unicef_data <- unicef_data %>%
+    mutate(
+      Financial_Inclusion_Male = case_when(
+        Financial_Inclusion_Male == "-" ~ NA_real_,
+        TRUE ~ as.numeric(Financial_Inclusion_Male)
+      ),
+      Financial_Inclusion_Female = case_when(
+        Financial_Inclusion_Female == "-" ~ NA_real_,
+        TRUE ~ as.numeric(Financial_Inclusion_Female)
+      )
+    )
+  
+  # add country code using countrycode package
+  unicef_data <- unicef_data %>%
+    mutate(
+      Country_Code = countrycode(
+        Country_Name, 
+        origin = "country.name",
+        destination = "iso3c",
+        warn = FALSE
+      )
+    )
+  
+  # manual fixes for countries that don't convert automatically
+  unicef_data <- unicef_data %>%
+    mutate(
+      Country_Code = case_when(
+        Country_Name == "Türkiye" ~ "TUR",
+        Country_Name == "Czechia" ~ "CZE",
+        TRUE ~ Country_Code
+      )
+    )
+  
+  # rename to match world bank format
+  unicef_data <- unicef_data %>%
+    rename(
+      `Country Name` = Country_Name,
+      `Country Code` = Country_Code
+    )
+  
+  return(unicef_data)
+}
+
+```
+
+```{r}
+# function to clean world bank excel files
+clean_wb_excel <- function(filepath, indicator_name) {
+  # read excel skipping the first 4 header rows
+  df <- read_excel(filepath, skip = 4)
+  
+  # reshape from wide to long format
+  df_long <- df %>%
+    select(`Country Name`, `Country Code`, starts_with("2")) %>%
+    pivot_longer(
+      cols = starts_with("2"),
+      names_to = "Year",
+      values_to = indicator_name
+    ) %>%
+    mutate(Year = as.numeric(Year)) %>%
+    
+  
+  return(df_long)
+}
+
+# function to clean world bank csv files
+clean_wb_csv <- function(filepath, indicator_name) {
+  # read csv skipping the first 4 header rows
+  df <- read_csv(filepath, skip = 4, show_col_types = FALSE)
+  
+  # reshape from wide to long format
+  df_long <- df %>%
+    select(`Country Name`, `Country Code`, starts_with("2")) %>%
+    pivot_longer(
+      cols = starts_with("2"),
+      names_to = "Year",
+      values_to = indicator_name
+    ) %>%
+    mutate(Year = as.numeric(Year)) %>%
+    # mutate old country codes to ISO3 standard
+    mutate(
+      `Country Code` = case_when(
+        `Country Code` == "KSV" ~ "KXX",  # Kosovo
+        TRUE ~ `Country Code`
+      )
+    )
+  return(df_long)
+}
+
+clean_wbl_indicators <- function(filepath) {
+  df <- read_csv(filepath, show_col_types = FALSE)
+  
+  df_clean <- df %>%
+    select(
+      `Country Code` = `ISO Code`,
+      Year = `Report Year`,
+      Gender_Discrimination_Law = `Does the law prohibit discrimination in employment based on gender?`,
+      Maternity_Leave_Days = `Length of paid maternity leave`,
+      Paternity_Leave_Days = `Length of paid paternity leave`,
+      Shared_Parental_Leave_Days = `Shared days`
+    ) %>%
+    mutate(
+      Gender_Discrimination_Law_Binary = if_else(Gender_Discrimination_Law == "Yes", 1, 0)
+    )
+  
+  return(df_clean)
+}
+
+# function to clean world development indicators
+clean_wdi <- function(filepath) {
+  # read the wdi csv file
+  df <- read_csv(filepath, show_col_types = FALSE)
+  
+  # filter out rows with missing series names
+  df <- df %>%
+    filter(!is.na(`Series Name`))
+  
+  # reshape from wide to long format for years
+  df_long <- df %>%
+    select(`Country Name`, `Country Code`, `Series Code`, starts_with("2")) %>%
+    pivot_longer(
+      cols = starts_with("2"),
+      names_to = "Year",
+      values_to = "Value"
+    ) %>%
+    mutate(
+      Year = as.numeric(Year),
+      Value = as.numeric(Value)
+    ) %>%
+    # create indicator names based on series code
+    mutate(
+      Indicator = case_when(
+        `Series Code` == "SL.UEM.NEET.FE.ME.ZS" ~ "Youth_Not_In_Edu_Employment_Training_Female_Pct",
+        `Series Code` == "SL.UEM.NEET.MA.ME.ZS" ~ "Youth_Not_In_Edu_Employment_Training_Male_Pct",
+        `Series Code` == "SL.UEM.NEET.ME.ZS" ~ "Youth_Not_In_Edu_Employment_Training_Total_Pct",
+        `Series Code` == "SL.UEM.TOTL.FE.ZS" ~ "Unemployment_Female_Pct",
+        `Series Code` == "SL.UEM.TOTL.MA.ZS" ~ "Unemployment_Male_Pct",
+        `Series Code` == "SL.UEM.TOTL.ZS" ~ "Unemployment_Total_Pct",
+        TRUE ~ "Other"
+      )
+    ) %>%
+    filter(Indicator != "Other") %>%
+    select(`Country Name`, `Country Code`, Year, Indicator, Value) %>%
+    pivot_wider(
+      names_from = Indicator,
+      values_from = Value,
+      values_fn = first
+    )
+  
+  return(df_long)
+}
+```
+
+```{r}
+# reading all datasets
+
+# educational attainment (female, post-secondary)
+education_female_df <- clean_wb_csv(
+  "Educational attainment, at least post-secondary (female, ages 25+).csv",
+  "Female_PostSecondary_Education_Pct"
+)
+
+# educational attainment (male, post-secondary)
+education_male_df <- clean_wb_csv(
+  "Educational attainment, at least post-secondary (male, ages 25+).csv",
+  "Male_PostSecondary_Education_Pct"
+)
+
+# gdp per capita growth (annual %)
+gdp_growth_df <- clean_wb_csv(
+  "GDP Per Capita Growth (Annual).csv",
+  "GDP_Per_Capita_Growth_Annual_Pct"
+)
+
+# gdp per capita (absolute values)
+gdp_capita_df <- clean_wb_csv(
+  "GDP Per Capita.csv",
+  "GDP_Per_Capita"
+)
+
+# labour force participation (female)
+lfp_female_df <- clean_wb_csv(
+  "Labour Force Participation (female, 15+).csv",
+  "Labour_Force_Participation_Female_Pct"
+)
+
+# labour force participation (male)
+lfp_male_df <- clean_wb_csv(
+  "Labour Force Participation (male, 15+).csv",
+  "Labour_Force_Participation_Male_Pct"
+)
+
+# financial inclusion from unicef
+financial_inclusion_df <- clean_unicef_financial("UNICEF.xlsx")
+
+# maternal mortality ratio
+maternal_mort_df <- clean_wb_csv(
+  "Maternal mortality ratio (modeled estimate, per 100,000 live births).csv",
+  "Maternal_Mortality_Ratio_Per_100k"
+)
+
+# women in parliament (%)
+parliament_df <- clean_wb_csv(
+  "Proportion of seats held by women in national parliament (%) .csv",
+  "Women_in_Parliament_Pct"
+)
+
+# literacy rate (adult female)
+literacy_female_df <- clean_wb_csv(
+  "Literacy rate, Adult Female (15+).csv",
+  "Adult_Literacy_Rate_Female_Pct"
+)
+
+# literacy rate (adult male)
+literacy_male_df <- clean_wb_csv(
+  "Literacy rate, Adult Male (15+).csv",
+  "Adult_Literacy_Rate_Male_Pct"
+)
+
+# literacy rate (adult male and female combined)
+literacy_combined_df <- clean_wb_excel(
+  "Literacy rate, adult male and female (% of population ages 15+).xlsx",
+  "Adult_Literacy_Rate_Combined_Pct"
+)
+
+# wbl indicators (women business and law)
+wbl_df <- clean_wbl_indicators("NEW_WBL_Indicators.csv")
+
+# world development indicators (youth not in education and unemployment)
+wdi_df <- clean_wdi("NEW_world_development_indicators.csv")
+```
+
+```{r}
+# get unique year-country combinations from world bank data
+all_year_country_combos <- education_female_df %>%
+  select(`Country Name`, `Country Code`, Year) %>%
+  bind_rows(
+    gdp_growth_df %>% select(`Country Name`, `Country Code`, Year),
+    parliament_df %>% select(`Country Name`, `Country Code`, Year),
+    literacy_combined_df %>% select(`Country Name`, `Country Code`, Year)
+  ) %>%
+  distinct()
+
+# broadcast unicef financial inclusion to all years (since it's not time-series data)
+financial_df <- all_year_country_combos %>%
+  left_join(
+    financial_inclusion_df %>% 
+      select(`Country Code`, Financial_Inclusion_Male, Financial_Inclusion_Female),
+    by = "Country Code"
+  )
+```
+
+```{r}
+# function to assign world bank regions using country codes
+assign_region_by_code <- function(country_code) {
+  # east asia and pacific
+  east_asia_pacific <- c("ASM", "AUS", "BRN", "KHM", "CHN", "FJI", "PYF", "GUM", 
+                         "HKG", "IDN", "JPN", "KIR", "PRK", "KOR", "LAO", "MAC", 
+                         "MYS", "MHL", "FSM", "MNG", "MMR", "NRU", "NCL", "NZL", 
+                         "MNP", "PLW", "PNG", "PHL", "WSM", "SGP", "SLB", "TWN", 
+                         "THA", "TLS", "TON", "TUV", "VUT", "VNM")
+  
+  # europe and central asia
+  europe_central_asia <- c("ALB", "AND", "ARM", "AUT", "AZE", "BLR", "BEL", "BIH", 
+                           "BGR", "HRV", "CYP", "CZE", "DNK", "EST", "FRO", "FIN", 
+                           "FRA", "GEO", "DEU", "GIB", "GRC", "GRL", "HUN", "ISL", 
+                           "IRL", "IMN", "ITA", "KAZ", "XKX", "KGZ", "LVA", "LIE", 
+                           "LTU", "LUX", "MDA", "MCO", "MNE", "NLD", "MKD", "NOR", 
+                           "POL", "PRT", "ROU", "RUS", "SMR", "SRB", "SVK", "SVN", 
+                           "ESP", "SWE", "CHE", "TJK", "TUR", "TKM", "UKR", "GBR", "UZB")
+  
+  # latin america and caribbean
+  latin_america <- c("ATG", "ARG", "ABW", "BHS", "BRB", "BLZ", "BOL", "BRA", "VGB", 
+                     "CYM", "CHL", "COL", "CRI", "CUB", "CUW", "DMA", "DOM", "ECU", 
+                     "SLV", "GRD", "GTM", "GUY", "HTI", "HND", "JAM", "MEX", "NIC", 
+                     "PAN", "PRY", "PER", "PRI", "SXM", "KNA", "LCA", "MAF", "VCT", 
+                     "SUR", "TTO", "TCA", "URY", "VEN", "VIR")
+  
+  # middle east, north africa, afghanistan and pakistan
+  mena <- c("AFG", "DZA", "BHR", "DJI", "EGY", "IRN", "IRQ", "ISR", "JOR", "KWT", 
+            "LBN", "LBY", "MLT", "MAR", "OMN", "PAK", "QAT", "SAU", "SYR", "TUN", 
+            "ARE", "PSE", "YEM")
+  
+  # north america
+  north_america <- c("BMU", "CAN", "USA")
+  
+  # south asia
+  south_asia <- c("BGD", "BTN", "IND", "MDV", "NPL", "LKA")
+  
+  # sub-saharan africa
+  sub_saharan_africa <- c("AGO", "BEN", "BWA", "BFA", "BDI", "CPV", "CMR", "CAF", 
+                          "TCD", "COM", "COD", "COG", "CIV", "GNQ", "ERI", "SWZ", 
+                          "ETH", "GAB", "GMB", "GHA", "GIN", "GNB", "KEN", "LSO", 
+                          "LBR", "MDG", "MWI", "MLI", "MRT", "MUS", "MOZ", "NAM", 
+                          "NER", "NGA", "RWA", "STP", "SEN", "SYC", "SLE", "SOM", 
+                          "ZAF", "SSD", "SDN", "TZA", "TGO", "UGA", "ZMB", "ZWE", "AFW", "AFE")
+  
+  # assign region
+  region <- case_when(
+    country_code %in% east_asia_pacific ~ "East Asia & Pacific",
+    country_code %in% europe_central_asia ~ "Europe & Central Asia",
+    country_code %in% latin_america ~ "Latin America & Caribbean",
+    country_code %in% mena ~ "Middle East & North Africa",
+    country_code %in% north_america ~ "North America",
+    country_code %in% south_asia ~ "South Asia",
+    country_code %in% sub_saharan_africa ~ "Sub-Saharan Africa",
+    TRUE ~ "Other"
+  )
+  
+  return(region)
+}
+```
+
+```{r}
+# combine all datasets
+combined_df <- gdp_capita_df %>%
+  full_join(gdp_growth_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(education_female_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(education_male_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(lfp_female_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(lfp_male_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(financial_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(maternal_mort_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(parliament_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(literacy_female_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(literacy_male_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(literacy_combined_df, by = c("Country Name", "Country Code", "Year")) %>%
+  full_join(wbl_df, by = c("Country Code", "Year")) %>%
+  full_join(wdi_df, by = c("Country Name", "Country Code", "Year")) %>%
+  # manually fix taiwan as world bank doesn't have it but women business law does have it
+  mutate(
+    `Country Name` = case_when(
+      `Country Code` == "TWN" ~ "Taiwan",
+      TRUE ~ `Country Name`
+    )
+  ) %>%
+  # filter out regional aggregates
+  filter(!`Country Code` %in% c("AFE", "AFW", "ARB", "CSS", "CEB", "CHI", "EAR", "EAS", "TEA", "EAP", "EMU", "ECS", "TEC", "ECA", "EUU", "FCS", "HPC", "HIC", "IBD", "IBT", "IDB", "IDX", "IDA", "LTE", "LCN", "LAC", "TLA", "LDC", "LMY", "LIC", "LMC", "MEA", "TMN", "MNA", "MIC", "NAC", "INX", "OED", "OSS", "PSS", "PST", "PRE","SST", "SAS", "TSA", "SSF", "TSS", "SSA", "UMC", "WLD", "KSV")) %>%
+  # add region column
+  mutate(Region = assign_region_by_code(`Country Code`)) %>%
+  # reorder columns
+  select(
+    `Country Name`, `Country Code`, Region, Year,
+    GDP_Per_Capita,
+    GDP_Per_Capita_Growth_Annual_Pct,
+    Female_PostSecondary_Education_Pct,
+    Male_PostSecondary_Education_Pct,
+    Labour_Force_Participation_Female_Pct,
+    Labour_Force_Participation_Male_Pct,
+    Financial_Inclusion_Female,
+    Financial_Inclusion_Male,
+    Maternal_Mortality_Ratio_Per_100k,
+    Women_in_Parliament_Pct,
+    Adult_Literacy_Rate_Female_Pct,
+    Adult_Literacy_Rate_Male_Pct,
+    Adult_Literacy_Rate_Combined_Pct,
+    Gender_Discrimination_Law,
+    Gender_Discrimination_Law_Binary,
+    Maternity_Leave_Days,
+    Paternity_Leave_Days,
+    Shared_Parental_Leave_Days,
+    Youth_Not_In_Edu_Employment_Training_Female_Pct,
+    Youth_Not_In_Edu_Employment_Training_Male_Pct,
+    Youth_Not_In_Edu_Employment_Training_Total_Pct,
+    Unemployment_Female_Pct,
+    Unemployment_Male_Pct,
+    Unemployment_Total_Pct
+  ) %>%
+  arrange(`Country Name`, Year)
+```
+
+
+```{r}
+# save the complete combined dataset
+write_csv(combined_df, "combined_womens_empowerment_data.csv")
+```
